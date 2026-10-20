@@ -38,6 +38,7 @@ header{display:flex;flex-wrap:wrap;align-items:center;gap:12px;padding:6px 0 18p
 .switch input{accent-color:var(--accent)}
 /* kpi */
 .kpis{display:grid;grid-template-columns:repeat(4,1fr);gap:12px;margin-bottom:12px}
+.cov-err{background:#FDECEA;border:1px solid #F5B7B1;border-left:4px solid #C0392B;border-radius:8px;padding:10px 12px;margin-bottom:12px;color:#922B21;font-size:13px;line-height:1.7}
 .kpi{background:var(--card);border:1px solid var(--line);border-radius:12px;padding:14px 16px}
 .kpi .lab{font-size:12px;color:var(--ink-2)}
 .kpi .val{font-family:var(--mono);font-size:22px;font-weight:600;margin-top:4px;font-variant-numeric:tabular-nums}
@@ -119,6 +120,7 @@ footer{margin-top:24px;padding-top:14px;border-top:1px solid var(--line);font-si
     </div>
   </header>
 
+  <div id="alert"></div>
   <section class="kpis" id="kpis"></section>
   <section class="agents" id="agentChips"></section>
 
@@ -784,12 +786,23 @@ function gotoPage(p){ currentPage = p; renderTable(); }
 function renderCoverage(){
   if (!data) return;
   const cov = data.coverage||[];
-  const notes = cov.map(c => {
+  // 采集中断必须单独、置顶、醒目地报出来：
+  // 出错的 agent 库里还留着旧数据，卡片照常显示旧值 + "估算"徽章，
+  // 看上去一切正常；若混在底部"覆盖说明"里，用户根本不会看到。
+  const errs = cov.filter(c => c.status==='error');
+  const errKeys = new Set(errs.map(e => e.agent));
+  const others = cov.filter(c => c.status!=='error' && !errKeys.has(c.agent));
+  const notes = others.map(c => {
     if (c.status==='empty') return `<code>${c.name}</code>：${c.note}`;
     if (c.status==='estimate') return `<code>${c.name}</code>：${c.note}`;
     return '';
   }).filter(Boolean).join('　·　');
   $('coverage').innerHTML = notes ? '覆盖说明：' + notes : '';
+  if (!$('alert')) return;
+  $('alert').innerHTML = errs.length ? errs.map(e =>
+    `<div class="cov-err"><b>⛔ ${e.name} 采集中断（下方数字是旧值，已停止更新）</b>`
+    + `<div style="margin-top:4px">${(e.note||'').replace(/\n/g,'<br>')}</div></div>`
+  ).join('') : '';
 }
 
 function render(){

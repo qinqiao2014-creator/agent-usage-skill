@@ -104,6 +104,33 @@ def _timeline_headers(cookie_str):
 _last_error = None
 
 
+class _LoginExpired(Exception):
+    """timeline 接口在**业务层**判定登录失效。
+
+    为什么单独建一个类：登录过期时 HTTP 状态码仍是 **200**，
+    只有业务码会说话（code=710012001 / message="login invalid"）。
+    若当普通响应放行，后面 data 是 null 会把 .get 直接打崩，
+    且崩出的 AttributeError 会被归成「网络抖动」——
+    于是报错文案说「cookie 仍是好的，稍后重试」，
+    用户永远不去换 cookie，数据就一直冻结在旧值。
+    必须单独识别、立刻上抛（重试毫无意义）。
+    """
+
+
+def _login_invalid(resp):
+    """判定 timeline 响应是否为登录失效（只看业务码，不看 HTTP 状态码）。"""
+    if not isinstance(resp, dict):
+        return False
+    err = resp.get('error') or {}
+    code = resp.get('code') or err.get('code')
+    msg = ' '.join(str(x) for x in (
+        resp.get('message'), resp.get('msg'), err.get('message')) if x)
+    low = msg.lower()
+    if code == 710012001 or 'login invalid' in low or '登录已过期' in msg:
+        return True
+    return bool(code) and 'login' in low
+
+
 def _request_page(cookie_str, cursor, timeout=20, retries=3):
     """拉 timeline 单页，带指数退避重试。
 
@@ -118,7 +145,16 @@ def _request_page(cookie_str, cursor, timeout=20, retries=3):
         try:
             req = urllib.request.Request(_TIMELINE_URL, data=body,
                                          headers=headers, method="POST")
-            return json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+            resp = json.loads(urllib.request.urlopen(req, timeout=timeout).read())
+            # 业务层报错藏在 HTTP 200 里（登录过期就是这种典型形态）：
+            # 必须在这里拦下，否则会白重试 3 次再翻 200 页，
+            # 等 2 分钟最后还误报成「网络问题，cookie 是好的」
+            if _login_invalid(resp):
+                raise _LoginExpired(resp.get('msg') or resp.get('message')
+                                    or 'login invalid')
+            return resp
+        except _LoginExpired:
+            raise                        # 认证类：重试无用，直接上抛
         except urllib.error.HTTPError as e:
             if 400 <= e.code < 500:      # 认证/参数类，重试无用
                 raise
@@ -161,7 +197,7 @@ def _fetch_timeline(cookie_str):
     try:
         for _ in range(200):
             r = _request_page(cookie_str, cursor)
-            d = r.get("data", {})
+            d = r.get("data") or {}      # data 可能是 null，不能直接喂给 .get
             entries = d.get("entries", [])
             if not entries:
                 break
@@ -198,6 +234,12 @@ def _fetch_timeline(cookie_str):
             if not d.get("has_more") or not cursor:
                 break
             time.sleep(_PAGE_DELAY)   # 限流保护，必须在翻页前
+    except _LoginExpired:
+        # 登录过期是**认证**问题，绝不是网络抖动：必须报 auth，
+        # 否则 _cookie_hint 会渲染成「cookie 仍是好的，稍后重试」，
+        # 用户就不会去换 cookie，豆包数据会一直冻结在旧值。
+        _last_error = ('auth', '登录已过期')
+        return None, None, {}
     except Exception as e:
         # 区分「网络层抖动」与「认证失败」——两者处置完全不同：
         #   网络失败 ⇒ 重试/稍后再扫，cookie 没坏，别去重新登录
@@ -235,6 +277,12 @@ def _cookie_hint():
     if _last_error and _last_error[0] == 'net':
         return (f"网络/TLS 请求失败（与 cookie 无关，cookie 仍是好的）：{_last_error[1]}\n"
                 f"    已自动重试 3 次仍失败，稍后重扫即可，无需重新登录")
+    if _last_error and _last_error[0] == 'auth':
+        return (f"cookie 已失效（{_last_error[1]}）：请重新登录 doubao.com，"
+                f"把新 Cookie 覆盖写入 {_CONFIG_PATH}\n"
+                f'    格式：{{"doubao_cookie": "你的cookie字符串"}}\n'
+                f"    取法：F12 → Network → 点任意 doubao.com 请求 → "
+                f"Request Headers 里 Cookie 整串复制")
     return (f"cookie 已配置（{_CONFIG_PATH}）但接口认证失败"
             f"{'（' + _last_error[1] + '）' if _last_error else ''}，多半已过期："
             f"请重新登录 doubao.com 复制 Cookie 覆盖该文件")

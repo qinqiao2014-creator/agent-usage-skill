@@ -249,7 +249,7 @@ def scan(full=False, only=None):
             con.execute('delete from daily where agent not in (%s)' % ph, al)
             con.commit()
 
-    data = build_json(con, now, plugins)
+    data = build_json(con, now, plugins, stats)
     con.close()
 
     with open(JSON_PATH, 'w', encoding='utf-8') as f:
@@ -258,7 +258,7 @@ def scan(full=False, only=None):
     return data, stats
 
 
-def build_json(con, now, plugins=None):
+def build_json(con, now, plugins=None, stats=None):
     plugins = plugins or get_plugins()
     names = {p['key']: p['name'] for p in plugins}
     est_flags = {p['key']: p['estimate'] for p in plugins}
@@ -337,6 +337,15 @@ def build_json(con, now, plugins=None):
     total_real = sum(a['real_tokens'] for a in agents.values())
     total_est = sum(a['est_tokens'] for a in agents.values())
     coverage = []
+    # 采集中断的 agent 必须显式报出来（且排最前）：
+    # 它库里还留着旧数据，所以既不会进 'empty'、也不会消失，
+    # 卡片照常显示旧值 + "估算"徽章 —— 看上去一切正常。
+    # 若不报，用户永远不知道 cookie 已失效、数据早就冻住了。
+    for k, st in (stats or {}).items():
+        if st.get('status') == 'error':
+            pname = next((p['name'] for p in (plugins or []) if p['key'] == k), k)
+            coverage.append({'agent': k, 'name': pname,
+                             'status': 'error', 'note': st.get('error', '')})
     for p in plugins:
         k = p['key']
         if k not in agents:
